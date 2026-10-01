@@ -121,6 +121,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
             )
             parser.add_argument(
+                "--rollout-env-vars",
+                type=json.loads,
+                default="{}",
+                help="Extra environment variables for rollout engine processes.",
+            )
+            parser.add_argument(
                 "--force-fp8-ue8m0-scale",
                 action="store_true",
                 default=False,

@@ -521,5 +521,25 @@ def test_force_fp8_ue8m0_scale_argument(monkeypatch):
     assert configured.force_fp8_ue8m0_scale is True
 
 
+@pytest.mark.unit
+def test_rollout_env_vars_argument(monkeypatch):
+    module = load_slime_arguments_module(monkeypatch)
+    parser = argparse.ArgumentParser()
+    module.get_slime_extra_args_provider()(parser)
+
+    defaults = parser.parse_args(["--rollout-batch-size", "1"])
+    configured = parser.parse_args(
+        [
+            "--rollout-batch-size",
+            "1",
+            "--rollout-env-vars",
+            '{"SGLANG_EXTERNAL_MODEL_PACKAGE":"isoexec.runtimes.sglang"}',
+        ]
+    )
+
+    assert defaults.rollout_env_vars == {}
+    assert configured.rollout_env_vars == {"SGLANG_EXTERNAL_MODEL_PACKAGE": "isoexec.runtimes.sglang"}
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
