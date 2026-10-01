@@ -60,6 +60,10 @@ logger = logging.getLogger(__name__)
 
 
 class MegatronTrainRayActor(TrainRayActor):
+    def initialize_model_and_optimizer(self, args: Namespace, role: str):
+        """Allow subclasses to replace model initialization without copying ``init``."""
+        return initialize_model_and_optimizer(args, role)
+
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
         self,
@@ -99,7 +103,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         dist.barrier(group=get_gloo_group())
 
-        self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
+        self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = self.initialize_model_and_optimizer(
             args, role
         )
 
