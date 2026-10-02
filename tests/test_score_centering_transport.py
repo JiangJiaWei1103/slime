@@ -161,7 +161,7 @@ def test_streaming_score_centering_rejected():
 
 
 @pytest.mark.parametrize("transport", ["object-store", "nixl"])
-def test_dp_transport_keeps_heads_aligned(monkeypatch, transport):
+def test_dp_transport_keeps_sampler_metadata_aligned(monkeypatch, transport):
     from slime.data import batch_builder as rollout
 
     mgr = manager(rollout_data_transport=transport, global_batch_size=2)
@@ -175,10 +175,14 @@ def test_dp_transport_keeps_heads_aligned(monkeypatch, transport):
 
     monkeypatch.setattr(rollout.ray, "put", put)
     data = samples()
+    data[0].weight_versions = ["run:1"]
+    data[1].weight_versions = ["run:2"]
     data[1].rollout_topk_token_ids[0] = [5, 6, 7]
     refs = mgr.split_by_dp(mgr.convert(data))
     assert refs[0].inner["rollout_topk_token_ids"][0].tolist() == [[5, 6, 7]]
     assert refs[1].inner["rollout_topk_token_ids"][0].tolist() == [[3, 1, 4]]
+    assert refs[0].inner["weight_versions"] == [["run:2"]]
+    assert refs[1].inner["weight_versions"] == [["run:1"]]
     assert captured == ([{"_tensor_transport": "nixl"}] * 2 if transport == "nixl" else [{}, {}])
 
 
