@@ -526,6 +526,7 @@ def train_one_step(
     opt_param_scheduler: OptimizerParamScheduler,
     num_microbatches: int,
     step_global_batch_size: int,
+    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP]], None] | None = None,
     microbatch_pbar=None,
 ) -> tuple[dict[str, float], float]:
     """Execute a single pipeline-parallel training step.
@@ -549,6 +550,7 @@ def train_one_step(
             normalizer inside the closure and as the LR scheduler
             ``increment``. In the common case (1 rollout = 1 sample) this
             equals the per-step sample count, so behavior is unchanged.
+        after_optimizer_step: Called only after the optimizer updates the model.
 
     Returns:
         tuple[dict[str, float], float]: Reduced loss dictionary (last stage only)
@@ -703,11 +705,8 @@ def train_one_step(
         update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
         assert update_successful
-        if args.custom_megatron_after_optimizer_step_hook_path:
-            from slime.utils.misc import load_function
-
-            custom_after_optimizer_step_hook = load_function(args.custom_megatron_after_optimizer_step_hook_path)
-            custom_after_optimizer_step_hook(optimizer, model)
+        if after_optimizer_step is not None:
+            after_optimizer_step(optimizer, model)
 
         # Update learning rate. Use the per-step global_batch_size when dynamic
         # batching is on so the scheduler's samples-seen counter tracks reality.
@@ -743,6 +742,7 @@ def train(
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
     global_batch_sizes: Sequence[int],
+    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP]], None] | None = None,
 ) -> None:
     """Run training over a rollout consisting of multiple steps.
 
@@ -762,6 +762,7 @@ def train(
             ``num_microbatches``; consumed by ``train_one_step`` for loss
             scaling and LR scheduler increments. Equals per-step sample count
             in the common case (1 rollout = 1 sample).
+        after_optimizer_step: Called after each successful optimizer update.
     """
     args = get_args()
 
@@ -865,6 +866,7 @@ def train(
             opt_param_scheduler,
             num_microbatches[step_id],
             global_batch_sizes[step_id],
+            after_optimizer_step=after_optimizer_step,
             microbatch_pbar=microbatch_pbar,
         )
 

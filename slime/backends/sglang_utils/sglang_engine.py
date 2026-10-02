@@ -325,6 +325,14 @@ class SGLangEngine(RayActor):
         response.raise_for_status()
         return response.json()["weight_version"]
 
+    def get_weights_by_name(self, name: str, truncate_size: int = 100):
+        if self.node_rank != 0:
+            return
+        return self._make_request(
+            "get_weights_by_name",
+            {"name": name, "truncate_size": truncate_size},
+        )
+
     def release_memory_occupation(self):
         self.flush_cache()
         return self._make_request("release_memory_occupation")

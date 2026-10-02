@@ -64,6 +64,19 @@ class MegatronTrainRayActor(TrainRayActor):
         """Allow subclasses to replace model initialization without copying ``init``."""
         return initialize_model_and_optimizer(args, role)
 
+    def create_weight_updater(self):
+        """Allow subclasses to replace weight transfer without copying ``init``."""
+        return create_weight_updater(
+            self.args,
+            self.model,
+            weights_getter=lambda: self.weights_backuper.get("actor"),
+            model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
+            quantization_config=getattr(self.hf_config, "quantization_config", None),
+        )
+
+    def after_optimizer_step(self, optimizer, model) -> None:
+        """Allow subclasses to finish an update before scheduler and weight sync."""
+
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
         self,
@@ -153,13 +166,7 @@ class MegatronTrainRayActor(TrainRayActor):
             args.update_weight_start_version = (
                 args.start_rollout_id if args.start_rollout_id is not None else start_rollout_id
             )
-        self.weight_updater = create_weight_updater(
-            self.args,
-            self.model,
-            weights_getter=lambda: self.weights_backuper.get("actor"),
-            model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
-            quantization_config=getattr(self.hf_config, "quantization_config", None),
-        )
+        self.weight_updater = self.create_weight_updater()
 
         # empty cache after initialization
         clear_memory()
@@ -441,6 +448,7 @@ class MegatronTrainRayActor(TrainRayActor):
             data_iterator,
             num_microbatches,
             global_batch_sizes,
+            after_optimizer_step=self.after_optimizer_step,
         )
 
         if mpu.is_pipeline_last_stage() and "values" in rollout_data:
@@ -563,6 +571,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     data_iterator,
                     num_microbatches,
                     global_batch_sizes,
+                    after_optimizer_step=self.after_optimizer_step,
                 )
             if capture_log_probs:
                 captured = drain_captured_log_probs()
