@@ -7,7 +7,7 @@ from slime.utils.arguments import parse_args
 from slime.utils.misc import should_run_periodic_action
 
 
-def train(args, restore_plan=None):
+def train(args, restore_plan=None, actor_cls=None):
     configure_logger()
     release_train = args.release_train
 
@@ -19,7 +19,7 @@ def train(args, restore_plan=None):
     # need to initialize rollout manager first to calculate num_rollout
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"], restore_plan=restore_plan)
 
-    actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
+    actor_model, critic_model = create_training_models(args, pgs, rollout_manager, actor_cls=actor_cls)
 
     if args.offload_rollout and not release_train:
         ray.get(rollout_manager.onload_weights.remote())
