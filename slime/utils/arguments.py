@@ -1547,6 +1547,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
             )
             parser.add_argument(
+                "--custom-megatron-after-optimizer-step-hook-path",
+                type=str,
+                default=None,
+                help="Path to a function called as hook(optimizer, model) after a successful optimizer step.",
+            )
+            parser.add_argument(
                 "--custom-megatron-forward-kwargs-path",
                 type=str,
                 default=None,

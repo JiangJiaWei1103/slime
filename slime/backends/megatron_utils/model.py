@@ -702,9 +702,15 @@ def train_one_step(
         # Update parameters.
         update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
+        assert update_successful
+        if args.custom_megatron_after_optimizer_step_hook_path:
+            from slime.utils.misc import load_function
+
+            custom_after_optimizer_step_hook = load_function(args.custom_megatron_after_optimizer_step_hook_path)
+            custom_after_optimizer_step_hook(optimizer, model)
+
         # Update learning rate. Use the per-step global_batch_size when dynamic
         # batching is on so the scheduler's samples-seen counter tracks reality.
-        assert update_successful
         opt_param_scheduler.step(increment=step_global_batch_size)
 
     # release grad
