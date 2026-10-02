@@ -1,5 +1,6 @@
 from argparse import Namespace
 from collections.abc import Callable, Iterator
+from functools import partial
 from typing import Any
 
 import torch
@@ -535,6 +536,7 @@ def get_log_probs_and_entropy(
     response_lengths: list[int],
     with_entropy: bool = False,
     non_loss_data: bool = True,
+    model=None,
     top_p_token_ids: list[list[int]] | None = None,
     top_p_token_offsets: list[list[int]] | None = None,
 ) -> dict[str, list[torch.Tensor]]:
@@ -553,8 +555,9 @@ def get_log_probs_and_entropy(
     assert logits.size(0) == 1, f"{logits.shape}"
     logits = logits.squeeze(0)
 
-    # Apply rollout temperature scaling to logits to match rollout-time log-probs.
+    # Model-owned scoring takes the original logits and temperature; native scoring takes scaled logits.
     rollout_temperature = getattr(args, "rollout_temperature", 1.0)
+    orig_logits = logits
     if rollout_temperature != 1.0:
         logits = logits / rollout_temperature
     logits = logits.contiguous()
@@ -583,16 +586,37 @@ def get_log_probs_and_entropy(
             args.allgather_cp,
         )
 
-    # --- compute on full [T,V] logits at once via calculate_log_probs_and_entropy ---
-    log_prob_full, entropy_full = calculate_log_probs_and_entropy(
-        logits,
-        full_tokens,
-        tp_group,
-        with_entropy=with_entropy,
-        with_entropy_grad=with_entropy_grad,
-        chunk_size=chunk_size,
-        log_prob_keep_mask=top_p_keep_mask,
-    )
+    # --- compute on full [T,V] logits at once ---
+    if args.custom_megatron_compute_logprobs_path is None:
+        log_prob_full, entropy_full = calculate_log_probs_and_entropy(
+            logits,
+            full_tokens,
+            tp_group,
+            with_entropy=with_entropy,
+            with_entropy_grad=with_entropy_grad,
+            chunk_size=chunk_size,
+            log_prob_keep_mask=top_p_keep_mask,
+        )
+    else:
+        compute_logprobs = load_function(args.custom_megatron_compute_logprobs_path)
+        log_prob_full = compute_logprobs(
+            model,
+            orig_logits.contiguous(),
+            full_tokens,
+            rollout_temperature,
+            top_p_keep_mask,
+        )
+        entropy_full = None
+        if with_entropy:
+            _, entropy_full = calculate_log_probs_and_entropy(
+                logits,
+                full_tokens,
+                tp_group,
+                with_entropy=True,
+                with_entropy_grad=with_entropy_grad,
+                chunk_size=chunk_size,
+                log_prob_keep_mask=top_p_keep_mask,
+            )
     log_prob_full = log_prob_full.squeeze(-1)  # [T, 1] -> [T]
 
     # --- extract per-sample response portions ---
@@ -1112,6 +1136,8 @@ def policy_loss_function(
     batch: RolloutBatch,
     logits: torch.Tensor,
     sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
+    *,
+    model=None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute policy loss (PPO/GSPO, CISPO or REINFORCE) and metrics.
 
@@ -1152,6 +1178,7 @@ def policy_loss_function(
         total_lengths=total_lengths,
         response_lengths=response_lengths,
         with_entropy=True,
+        model=model,
         **get_rollout_top_p_logprob_kwargs(args, batch),
     )
 
@@ -1429,6 +1456,8 @@ def sft_loss_function(
     batch: RolloutBatch,
     logits: torch.Tensor,
     sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
+    *,
+    model=None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute supervised fine-tuning loss over response tokens.
 
@@ -1456,6 +1485,7 @@ def sft_loss_function(
         total_lengths=total_lengths,
         response_lengths=response_lengths,
         with_entropy=False,
+        model=model,
     )
 
     log_probs = log_probs_and_entropy["log_probs"]
@@ -1480,6 +1510,8 @@ def loss_function(
     num_microbatches: int,
     step_global_batch_size: int,
     logits: torch.Tensor,
+    *,
+    model=None,
 ) -> tuple[torch.Tensor, int | torch.Tensor, dict[str, list[str] | torch.Tensor]]:
     """Dispatch to the configured loss and rescale for Megatron integration.
 
@@ -1529,6 +1561,9 @@ def loss_function(
             func = load_function(args.custom_loss_function_path)
         case _:
             raise ValueError(f"Unknown loss type: {args.loss_type}")
+
+    if func in (policy_loss_function, sft_loss_function):
+        func = partial(func, model=model)
 
     if args.recompute_loss_function:
         loss, log = checkpoint(func, args, batch, logits, sum_of_sample_mean, use_reentrant=False)

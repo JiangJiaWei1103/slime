@@ -1553,6 +1553,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Path to a function that transforms keyword arguments before each Megatron model forward.",
             )
             parser.add_argument(
+                "--custom-megatron-compute-logprobs-path",
+                type=str,
+                default=None,
+                help="Path to a function that computes selected-token log-probabilities from Megatron logits.",
+            )
+            parser.add_argument(
                 "--megatron-deepgemm-forward-layers",
                 nargs="+",
                 type=int,

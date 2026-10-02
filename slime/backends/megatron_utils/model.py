@@ -447,6 +447,8 @@ def forward_only(
             "response_lengths": response_lengths,
             "with_entropy": args.use_rollout_entropy,
         }
+        if args.custom_megatron_compute_logprobs_path is not None:
+            output_kwargs["model"] = model
         if use_rollout_top_p_replay:
             output_kwargs.update(get_rollout_top_p_logprob_kwargs(args, batch))
 
@@ -654,7 +656,14 @@ def train_one_step(
         if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
             os.environ["ROUTING_REPLAY_STAGE"] = old_stage
 
-        return output_tensor, partial(loss_function, args, batch, num_microbatches, step_global_batch_size)
+        return output_tensor, partial(
+            loss_function,
+            args,
+            batch,
+            num_microbatches,
+            step_global_batch_size,
+            model=model,
+        )
 
     # Forward pass.
     forward_backward_func = get_forward_backward_func()
