@@ -150,7 +150,7 @@ def is_npu_environment() -> bool:
     return (
         is_npu_available()
         or os.environ.get("SLIME_ACCELERATOR", "").lower() == "npu"
-        or "ASCEND_RT_VISIBLE_DEVICES" in os.environ
+        or bool(os.environ.get("ASCEND_RT_VISIBLE_DEVICES"))
         or bool(os.environ.get("ASCEND_HOME_PATH"))
     )
 
@@ -171,7 +171,7 @@ def _npu_requested() -> bool:
     configured = os.environ.get("SLIME_ACCELERATOR", "").lower()
     if configured and configured != "auto":
         return configured == "npu"
-    return "ASCEND_RT_VISIBLE_DEVICES" in os.environ or bool(os.environ.get("ASCEND_HOME_PATH"))
+    return bool(os.environ.get("ASCEND_RT_VISIBLE_DEVICES")) or bool(os.environ.get("ASCEND_HOME_PATH"))
 
 
 def _bootstrap_torch_npu_if_needed() -> bool:

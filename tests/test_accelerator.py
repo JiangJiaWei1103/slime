@@ -137,6 +137,17 @@ def test_cpu_only_initialization_does_not_require_an_accelerator(monkeypatch):
 
 
 @pytest.mark.unit
+def test_empty_ascend_visibility_does_not_select_npu(monkeypatch):
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "")
+    monkeypatch.setattr(accelerator, "is_musa_available", lambda: False)
+    monkeypatch.setattr(accelerator, "is_npu_available", lambda: False)
+    monkeypatch.setattr(accelerator, "is_supa_available", lambda: False)
+    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
+
+    assert accelerator.initialize_accelerator() is None
+
+
+@pytest.mark.unit
 def test_musa_backend_maps_devices_and_process_groups(monkeypatch):
     monkeypatch.setattr(accelerator.MUSAAccelerator, "is_available", lambda self: True)
     monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "2,5")
