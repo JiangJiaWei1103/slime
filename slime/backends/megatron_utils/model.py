@@ -526,7 +526,7 @@ def train_one_step(
     opt_param_scheduler: OptimizerParamScheduler,
     num_microbatches: int,
     step_global_batch_size: int,
-    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP]], None] | None = None,
+    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP], float], None] | None = None,
     microbatch_pbar=None,
 ) -> tuple[dict[str, float], float]:
     """Execute a single pipeline-parallel training step.
@@ -706,7 +706,7 @@ def train_one_step(
 
         assert update_successful
         if after_optimizer_step is not None:
-            after_optimizer_step(optimizer, model)
+            after_optimizer_step(optimizer, model, grad_norm)
 
         # Update learning rate. Use the per-step global_batch_size when dynamic
         # batching is on so the scheduler's samples-seen counter tracks reality.
@@ -742,7 +742,7 @@ def train(
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
     global_batch_sizes: Sequence[int],
-    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP]], None] | None = None,
+    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP], float], None] | None = None,
 ) -> None:
     """Run training over a rollout consisting of multiple steps.
 

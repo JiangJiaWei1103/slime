@@ -74,7 +74,7 @@ class MegatronTrainRayActor(TrainRayActor):
             quantization_config=getattr(self.hf_config, "quantization_config", None),
         )
 
-    def after_optimizer_step(self, optimizer, model) -> None:
+    def after_optimizer_step(self, optimizer, model, grad_norm) -> None:
         """Allow subclasses to finish an update before scheduler and weight sync."""
 
     @with_defer(lambda: Timer().start("train_wait"))
