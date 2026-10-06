@@ -1559,6 +1559,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Path to a function that computes selected-token log-probabilities from Megatron logits.",
             )
             parser.add_argument(
+                "--custom-sglang-server-pre-launch-path",
+                type=str,
+                default=None,
+                help="Path to a function called in the SGLang child before importing the HTTP server.",
+            )
+            parser.add_argument(
                 "--force-recompute-log-probs",
                 action="store_true",
                 default=False,

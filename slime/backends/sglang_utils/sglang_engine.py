@@ -28,7 +28,17 @@ def get_base_gpu_id(args, rank):
     return start_index
 
 
-def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
+def _launch_server(server_args: ServerArgs, pre_launch_path: str | None) -> None:
+    if pre_launch_path is not None:
+        from slime.utils.misc import load_function
+
+        load_function(pre_launch_path)()
+    from sglang.srt.entrypoints.http_server import launch_server
+
+    launch_server(server_args)
+
+
+def launch_server_process(server_args: ServerArgs, pre_launch_path: str | None = None) -> multiprocessing.Process:
     # Expandable segments help the colocated training actor tolerate repeated
     # cache releases, but SGLang's allocator/sleep path does not support them.
     # The rollout Ray actor inherits the job environment, so remove the option
@@ -45,11 +55,9 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
             wait_for_server=True,
         )
 
-    from sglang.srt.entrypoints.http_server import launch_server
-
     multiprocessing.set_start_method("spawn", force=True)
     server_args.host = server_args.host.strip("[]")
-    p = multiprocessing.Process(target=launch_server, args=(server_args,))
+    p = multiprocessing.Process(target=_launch_server, args=(server_args, pre_launch_path))
     p.start()
 
     if getattr(server_args, "node_rank", 0) != 0:
@@ -171,7 +179,10 @@ class SGLangEngine(RayActor):
 
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
-        self.process = launch_server_process(ServerArgs(**server_args_dict))
+        self.process = launch_server_process(
+            ServerArgs(**server_args_dict),
+            pre_launch_path=self.args.custom_sglang_server_pre_launch_path,
+        )
         self._register_to_router(server_args_dict)
 
     def _register_to_router(self, server_args_dict):
