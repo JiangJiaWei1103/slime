@@ -20,6 +20,7 @@ from slime.utils.weight_sync import (
     iter_source_chunks,
     rank0_then_share,
     should_flush_cache,
+    wait_weight_updates,
 )
 
 from ..megatron_to_hf import convert_to_hf
@@ -319,11 +320,11 @@ class UpdateWeightFromTensor:
             ray.get(
                 [
                     engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
-                    for engine in self.rollout_engines
+                    for engine in updated_engines
                 ]
             )
             if flush_cache:
-                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+                ray.get([engine.flush_cache.remote() for engine in updated_engines])
             begin_engine_round(updated_engines)
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
@@ -338,7 +339,7 @@ class UpdateWeightFromTensor:
             # Every rank iterates: the source's TP/EP gathers and PP broadcasts are collective.
             for named_tensors in iter_source_chunks(self.weight_source, self.args.update_weight_buffer_size):
                 refs, long_lived_tensors = self._send_hf_params(named_tensors)
-                ray.get(refs)
+                wait_weight_updates(refs, get_gloo_group())
                 del refs, long_lived_tensors, named_tensors
                 accelerator.ipc_collect()
                 accelerator.empty_cache()
@@ -381,7 +382,7 @@ class UpdateWeightFromTensor:
                 )
             # The version becomes visible only after every engine closed its session successfully.
             finish_engine_round(updated_engines, self.weight_version)
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+            ray.get([engine.continue_generation.remote() for engine in updated_engines])
 
         rank0_then_share(finish, get_gloo_group())
 

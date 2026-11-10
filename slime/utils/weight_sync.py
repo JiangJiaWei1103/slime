@@ -51,6 +51,23 @@ def rank0_then_share(fn, group):
         raise RuntimeError(f"weight update round failed on rank 0; generation stays paused: {status[0]}")
 
 
+def wait_weight_updates(refs, group) -> None:
+    """Wait for this rank's sends, and report any sender failure to every trainer rank."""
+    import ray
+    import torch.distributed as dist
+
+    error = None
+    try:
+        ray.get(refs)
+    except Exception as exc:
+        error = f"rank {dist.get_rank()}: {type(exc).__name__}: {exc}"
+    errors = [None] * dist.get_world_size(group)
+    dist.all_gather_object(errors, error, group=group)
+    failures = [item for item in errors if item is not None]
+    if failures:
+        raise RuntimeError(f"weight transfer failed; generation stays paused: {'; '.join(failures)}")
+
+
 def begin_engine_round(engines) -> None:
     """Open the native weight-update session on every engine that receives this round."""
     import ray

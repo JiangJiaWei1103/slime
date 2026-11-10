@@ -166,8 +166,19 @@ class UpdateWeightFromDistributed:
         """Broadcast the source's full stream from the PP-stage-0 source rank; all ranks iterate it."""
         sender = self._is_pp_src_rank and mpu.get_pipeline_model_parallel_rank() == 0
         for named_tensors in iter_source_chunks(self.weight_source, self.args.update_weight_buffer_size):
+            error = None
             if sender:
-                self._update_bucket_weights_from_distributed(named_tensors, pbar=pbar)
+                try:
+                    self._update_bucket_weights_from_distributed(named_tensors, pbar=pbar)
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+            # All ranks reach this point before the next source collective.
+            # Share errors raised by the sender, which otherwise strands its peers.
+            def check_sender(error=error):
+                if error is not None:
+                    raise RuntimeError(error)
+
+            rank0_then_share(check_sender, get_gloo_group())
         dist.barrier(group=get_gloo_group())
 
     def _send_weights(self, pbar: tqdm | None) -> None:
@@ -296,9 +307,11 @@ class UpdateWeightFromDistributed:
             load_format=load_format,
         )
 
-        ray.get(refs)
-        converted_named_tensors.clear()
-        ray.get(self.rollout_engine_lock.release.remote())
+        try:
+            ray.get(refs)
+            converted_named_tensors.clear()
+        finally:
+            ray.get(self.rollout_engine_lock.release.remote())
         pbar.update(1)
 
 
