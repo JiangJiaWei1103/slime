@@ -85,7 +85,19 @@ def _launch_server(server_args, parent_pid):
     # when the owner kills that actor before creating a replacement engine.
     kill_itself_when_parent_died()
     if os.getppid() == parent_pid:
-        launch_server(server_args)
+        try:
+            launch_server(server_args)
+        except Exception:
+            # multiprocessing joins live children before printing an unhandled
+            # exception. A failed TokenizerManager can leave schedulers running,
+            # hiding the error while the owner waits for HTTP readiness forever.
+            logger.exception("SGLang server launch failed")
+            for child in multiprocessing.active_children():
+                try:
+                    terminate_server_process(child)
+                except Exception:
+                    logger.exception("Failed to stop SGLang subprocess %s after launch failure", child.pid)
+            raise
 
 
 def _prepare_server_stdin():
