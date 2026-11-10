@@ -14,7 +14,13 @@ from tqdm import tqdm
 from slime.utils import accelerator
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.types import ParamInfo
-from slime.utils.weight_sync import should_flush_cache
+from slime.utils.weight_sync import (
+    begin_engine_round,
+    finish_engine_round,
+    iter_source_chunks,
+    rank0_then_share,
+    should_flush_cache,
+)
 
 from ..megatron_to_hf import convert_to_hf
 from ..sglang import FlattenedTensorBucket, MultiprocessingSerializer
@@ -65,10 +71,14 @@ class UpdateWeightFromTensor:
         *,
         model_name: str,
         quantization_config: dict[str, int | str | list[str]] | None,
+        weight_source=None,
     ) -> None:
         """
         Compute param buckets.  IPC Gloo groups are created later in
         ``connect_rollout_engines`` once ``engine_gpu_counts`` is known.
+
+        ``weight_source`` replaces Megatron-to-HF conversion with a stream of full logical tensors
+        (``iter_full()``) that the engine's own model loads by name; transport is unchanged.
         """
         self.args = args
         self.model = model
@@ -78,9 +88,15 @@ class UpdateWeightFromTensor:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self.update_weight_metrics: dict[str, float] = {}
+        self.weight_source = weight_source
+        self.distributed_rollout_engines = []
 
-        self._hf_weight_iterator = HfWeightIteratorDirect(
-            args=args, model=model, model_name=model_name, quantization_config=quantization_config
+        self._hf_weight_iterator = (
+            None
+            if weight_source is not None
+            else HfWeightIteratorDirect(
+                args=args, model=model, model_name=model_name, quantization_config=quantization_config
+            )
         )
         param_info_buckets = getattr(self._hf_weight_iterator, "megatron_local_param_info_buckets", None)
         self._full_param_info_buckets = (
@@ -174,6 +190,10 @@ class UpdateWeightFromTensor:
             if start <= self.rank < end:
                 self._ipc_engine = engine
 
+        if self.weight_source is not None:
+            # The source stream already carries every global expert; no expert transfer plan applies.
+            self._non_expert_param_info_buckets, self._expert_transfer_plan = None, []
+            return
         self._non_expert_param_info_buckets, self._expert_transfer_plan = configure_expert_routing(
             args=self.args,
             full_param_info_buckets=self._full_param_info_buckets,
@@ -293,7 +313,9 @@ class UpdateWeightFromTensor:
             self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
         )
 
-        if self.rank == 0:
+        updated_engines = [*self.rollout_engines, *(self.distributed_rollout_engines if self.use_distribute else [])]
+
+        def begin():
             ray.get(
                 [
                     engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
@@ -302,52 +324,66 @@ class UpdateWeightFromTensor:
             )
             if flush_cache:
                 ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            begin_engine_round(updated_engines)
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=True,
                     post_process_quantization=False,
                     rollout_engines=self.rollout_engines,
                 )
-        dist.barrier(group=get_gloo_group())
 
-        megatron_local_weights = self.weights_getter()
+        rank0_then_share(begin, get_gloo_group())
 
-        param_info_buckets = (
-            self._non_expert_param_info_buckets if self._expert_transfer_plan else self._full_param_info_buckets
-        )
-        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
-            megatron_local_weights,
-            param_info_buckets=param_info_buckets,
-        ):
-            refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
-            ray.get(refs)
-            # Free GPU tensors so the caching allocator can reuse the blocks,
-            # then release CUDA IPC cache entries whose consumers (sglang engines)
-            # have already closed their IPC handles.
-            del refs, long_lived_tensors, hf_named_tensors
-            accelerator.ipc_collect()
-            accelerator.empty_cache()
+        if self.weight_source is not None:
+            # Every rank iterates: the source's TP/EP gathers and PP broadcasts are collective.
+            for named_tensors in iter_source_chunks(self.weight_source, self.args.update_weight_buffer_size):
+                refs, long_lived_tensors = self._send_hf_params(named_tensors)
+                ray.get(refs)
+                del refs, long_lived_tensors, named_tensors
+                accelerator.ipc_collect()
+                accelerator.empty_cache()
+        else:
+            megatron_local_weights = self.weights_getter()
 
-        if self._expert_transfer_plan:
-            self._update_expert_weights(megatron_local_weights)
+            param_info_buckets = (
+                self._non_expert_param_info_buckets if self._expert_transfer_plan else self._full_param_info_buckets
+            )
+            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+                megatron_local_weights,
+                param_info_buckets=param_info_buckets,
+            ):
+                refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
+                ray.get(refs)
+                # Free GPU tensors so the caching allocator can reuse the blocks,
+                # then release CUDA IPC cache entries whose consumers (sglang engines)
+                # have already closed their IPC handles.
+                del refs, long_lived_tensors, hf_named_tensors
+                accelerator.ipc_collect()
+                accelerator.empty_cache()
 
-        del megatron_local_weights
+            if self._expert_transfer_plan:
+                self._update_expert_weights(megatron_local_weights)
+
+            del megatron_local_weights
         dist.barrier(group=get_gloo_group())
         # After the barrier all engines have returned, so every rank's last-chunk
         # IPC handles are now released by the consumers.  Clean them up.
         accelerator.ipc_collect()
         accelerator.empty_cache()
 
-        # int4/fp4 post_process
-        if self.rank == 0:
+        def finish():
+            # int4/fp4 post_process
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=False,
                     post_process_quantization=True,
                     rollout_engines=self.rollout_engines,
                 )
+            # The version becomes visible only after every engine closed its session successfully.
+            finish_engine_round(updated_engines, self.weight_version)
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
-        dist.barrier(group=get_gloo_group())
+
+        rank0_then_share(finish, get_gloo_group())
 
     def _send_hf_params(self, hf_named_tensors) -> tuple[list[ObjectRef], Any]:
         all_refs = []
@@ -357,7 +393,7 @@ class UpdateWeightFromTensor:
             ipc_engine=self._ipc_engine,
             ipc_gather_src=self._ipc_gather_src,
             ipc_gather_group=self._ipc_gather_group,
-            weight_version=self.weight_version,
+            weight_version=None,
         )
         all_refs.extend(refs_colocated)
 
@@ -365,7 +401,7 @@ class UpdateWeightFromTensor:
             refs_distributed = update_weights_from_distributed(
                 self._group_name,
                 self._model_update_groups,
-                self.weight_version,
+                None,
                 self.distributed_rollout_engines,
                 hf_named_tensors,
             )
@@ -436,8 +472,9 @@ def _send_to_colocated_engine(
             kwargs = {
                 "serialized_named_tensors": serialized_tensors_for_dtype,
                 "load_format": "flattened_bucket",
-                "weight_version": str(weight_version),
             }
+            if weight_version is not None:
+                kwargs["weight_version"] = str(weight_version)
             refs.append(ipc_engine.update_weights_from_tensor.remote(**kwargs))
 
     return refs, long_live_tensors

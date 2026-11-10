@@ -370,10 +370,38 @@ class SGLangEngine(RayActor):
     def get_weight_version(self):
         if self.node_rank != 0:
             return
-        url = f"http://{self.server_host}:{self.server_port}/get_weight_version"
+        # SGLang 0.5.23 reports the served version in /model_info; /get_weight_version came from a slime patch.
+        url = f"http://{self.server_host}:{self.server_port}/model_info"
         response = requests.get(url, timeout=self.args.rollout_health_check_timeout)
         response.raise_for_status()
         return response.json()["weight_version"]
+
+    def begin_weight_update(self):
+        """Open one native weight-update session; every tensor or distributed load must run inside it."""
+        result = self._make_request("begin_weight_update", {"selector": "all"})
+        if result is not None and not result.get("success", False):
+            raise RuntimeError(f"begin_weight_update failed: {result.get('message')}")
+        return result
+
+    def end_weight_update(self):
+        """Close the session; the model's round-completion checks run here and may refuse the round."""
+        if self.node_rank != 0:
+            return
+        url = f"http://{self.server_host}:{self.server_port}/end_weight_update"
+        response = requests.post(url, json={})
+        # A refused round answers 400 with its reason; the caller keeps generation paused.
+        result = response.json()
+        if not result.get("success", False):
+            raise RuntimeError(f"end_weight_update failed: {result.get('message')}")
+        return result
+
+    def get_weights_by_name(self, name: str, truncate_size: int = 100):
+        """SGLang's model metadata RPC; a native model may serve named receipts through it."""
+        return self._make_request("get_weights_by_name", {"name": name, "truncate_size": truncate_size})
+
+    def update_weight_version(self, new_version: str):
+        """Publish the active version after the whole update round has completed."""
+        return self._make_request("update_weight_version", {"new_version": str(new_version)})
 
     def release_memory_occupation(self):
         self.flush_cache()

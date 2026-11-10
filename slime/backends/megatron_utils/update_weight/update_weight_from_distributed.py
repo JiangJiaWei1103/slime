@@ -16,7 +16,13 @@ from tqdm import tqdm
 from slime.utils import accelerator
 from slime.utils.distributed_utils import get_gloo_group, init_process_group
 from slime.utils.http_utils import _wrap_ipv6
-from slime.utils.weight_sync import should_flush_cache
+from slime.utils.weight_sync import (
+    begin_engine_round,
+    finish_engine_round,
+    iter_source_chunks,
+    rank0_then_share,
+    should_flush_cache,
+)
 
 from ..megatron_to_hf import convert_to_hf
 from ..sglang import FlattenedTensorBucket
@@ -38,10 +44,15 @@ class UpdateWeightFromDistributed:
         *,
         model_name: str,
         quantization_config: dict[str, int | str | list[str]] | None,
+        weight_source=None,
     ) -> None:
         """
         Initialize. Groups created in connect_rollout_engines.
+
+        With ``weight_source``, every rank iterates its full logical stream (gathering TP/EP and
+        broadcasting PP stages); only the PP-stage-0 source rank broadcasts it to the engines.
         """
+        self.weight_source = weight_source
         self.args = args
         self.model = model
         self.model_name = model_name
@@ -110,7 +121,7 @@ class UpdateWeightFromDistributed:
             self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
         )
 
-        if dist.get_rank() == 0:
+        def begin():
             ray.get(
                 [
                     engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
@@ -119,6 +130,7 @@ class UpdateWeightFromDistributed:
             )
             if flush_cache:
                 ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            begin_engine_round(self.rollout_engines)
 
             # int4/fp4 pre_process
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
@@ -127,12 +139,16 @@ class UpdateWeightFromDistributed:
                     post_process_quantization=False,
                     rollout_engines=self.rollout_engines,
                 )
-        dist.barrier(group=get_gloo_group())
+
+        rank0_then_share(begin, get_gloo_group())
 
         pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
-        self._send_weights(pbar)
+        if self.weight_source is None:
+            self._send_weights(pbar)
+        else:
+            self._send_source_weights(pbar)
 
-        if dist.get_rank() == 0:
+        def finish():
             # int4/fp4 post_process
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
@@ -140,7 +156,18 @@ class UpdateWeightFromDistributed:
                     post_process_quantization=True,
                     rollout_engines=self.rollout_engines,
                 )
+            # The version becomes visible only after every engine closed its session successfully.
+            finish_engine_round(self.rollout_engines, self.weight_version)
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+
+        rank0_then_share(finish, get_gloo_group())
+
+    def _send_source_weights(self, pbar: tqdm | None) -> None:
+        """Broadcast the source's full stream from the PP-stage-0 source rank; all ranks iterate it."""
+        sender = self._is_pp_src_rank and mpu.get_pipeline_model_parallel_rank() == 0
+        for named_tensors in iter_source_chunks(self.weight_source, self.args.update_weight_buffer_size):
+            if sender:
+                self._update_bucket_weights_from_distributed(named_tensors, pbar=pbar)
         dist.barrier(group=get_gloo_group())
 
     def _send_weights(self, pbar: tqdm | None) -> None:
@@ -263,7 +290,7 @@ class UpdateWeightFromDistributed:
         refs = update_weights_from_distributed(
             self._group_name,
             self._model_update_groups,
-            self.weight_version,
+            None,
             self.rollout_engines,
             converted_named_tensors,
             load_format=load_format,
@@ -337,7 +364,7 @@ def disconnect_rollout_engines_from_distributed(group_name, model_update_groups,
 def update_weights_from_distributed(
     group_name: str,
     group: dist.ProcessGroup,
-    weight_version: int,
+    weight_version: int | None,
     rollout_engines: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
     load_format: str | None = None,
@@ -360,7 +387,7 @@ def update_weights_from_distributed(
             dtypes=[param.dtype for _, param in converted_named_tensors],
             shapes=[param.shape for _, param in converted_named_tensors],
             group_name=group_name,
-            weight_version=str(weight_version),
+            weight_version=None if weight_version is None else str(weight_version),
             load_format=remote_load_format,
         )
         for engine in rollout_engines

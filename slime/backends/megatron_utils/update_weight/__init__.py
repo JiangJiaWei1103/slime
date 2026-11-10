@@ -14,8 +14,13 @@ def create_weight_updater(
     *,
     model_name: str,
     quantization_config: dict[str, Any] | None,
+    weight_source=None,
 ):
-    """Select and construct the weight updater for the configured transport."""
+    """Select and construct the weight updater for the configured transport.
+
+    ``weight_source`` (``metadata`` and ``iter_full()`` of full logical tensors) replaces the
+    Megatron-to-HF conversion; the selected native transport and its control flow are unchanged.
+    """
     update_weight_mode = args.update_weight_mode
     update_weight_transport = args.update_weight_transport
 
@@ -45,12 +50,18 @@ def create_weight_updater(
 
         update_weight_cls = UpdateWeightFromDistributed
 
+    kwargs = {}
+    if weight_source is not None:
+        if update_weight_cls.__name__ not in ("UpdateWeightFromTensor", "UpdateWeightFromDistributed"):
+            raise ValueError(f"a weight source is supported by the tensor and NCCL transports, not {update_weight_cls}")
+        kwargs["weight_source"] = weight_source
     updater = update_weight_cls(
         args,
         model,
         weights_getter,
         model_name=model_name,
         quantization_config=quantization_config,
+        **kwargs,
     )
     updater.weight_version = getattr(args, "update_weight_start_version", 0)
     return updater
