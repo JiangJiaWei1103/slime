@@ -285,7 +285,12 @@ class BatchBuilder:
             "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
             "sample_indices": [sample.index for sample in samples],
             "rollout_ids": rollout_ids,
+            "weight_versions": [sample.weight_versions for sample in samples],
         }
+        if any(sample.rollout_full_logprobs is not None for sample in samples):
+            if any(sample.rollout_full_logprobs is None for sample in samples):
+                raise ValueError("full logprob rows must be present on every sample or none")
+            train_data["rollout_full_logprobs"] = [sample.rollout_full_logprobs for sample in samples]
 
         # loss mask
         # TODO: compress the loss mask
@@ -471,6 +476,8 @@ class BatchBuilder:
             "round_number",
             "sample_indices",
             "rollout_ids",
+            "weight_versions",
+            "rollout_full_logprobs",
             "rollout_mask_sums",
             "rollout_log_probs",
             "rollout_topk_token_ids",

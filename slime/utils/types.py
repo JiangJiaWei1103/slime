@@ -81,6 +81,19 @@ def _pad_rollout_top_p_offsets(
     return token_ids, torch.cat([offsets, empty_offsets])
 
 
+def _decode_full_logprob_rows(rows, expected_rows: int) -> np.ndarray:
+    """Decode per-token base64 little-endian float32 rows into one [T, V] array, bit for bit."""
+    import base64
+
+    if not isinstance(rows, list) or len(rows) != expected_rows:
+        raise ValueError(f"full_logprobs must hold one row per generated token: {expected_rows} expected")
+    decoded = [np.frombuffer(base64.b64decode(row, validate=True), dtype="<f4") for row in rows]
+    width = decoded[0].size
+    if width == 0 or any(row.size != width for row in decoded):
+        raise ValueError("full_logprobs rows must share one non-empty vocabulary width")
+    return np.stack(decoded)
+
+
 def _to_int_list(tokens) -> list[int]:
     if tokens is None:
         return []
@@ -139,6 +152,9 @@ class Sample:
     rollout_top_p_token_ids: list[int] | torch.Tensor | TensorRef | None = None
     rollout_top_p_token_offsets: list[int] | torch.Tensor | TensorRef | None = None
     rollout_top_p_log_probs: np.ndarray | torch.Tensor | list[float] | TensorRef | None = None
+    # Complete-vocabulary float32 log-probabilities, one [V] row per response token, from an engine
+    # that reports them in meta_info["full_logprobs"] (base64 little-endian float32 per token).
+    rollout_full_logprobs: np.ndarray | None = None
     rollout_routed_experts: list[list[int]] | list[torch.Tensor] | torch.Tensor | TensorRef | None = (
         None  # Routed experts from rollout engine
     )
@@ -406,6 +422,14 @@ class Sample:
         update_terminal_info: bool = True,
     ) -> None:
         applied_top_p_data = False
+        if new_token_count and "full_logprobs" in meta_info:
+            rows = _decode_full_logprob_rows(meta_info["full_logprobs"], new_token_count)
+            previous = self.response_length - new_token_count
+            if (0 if self.rollout_full_logprobs is None else len(self.rollout_full_logprobs)) != previous:
+                raise ValueError("full logprob rows must cover every earlier response token before appending")
+            self.rollout_full_logprobs = (
+                rows if self.rollout_full_logprobs is None else np.concatenate((self.rollout_full_logprobs, rows))
+            )
         if new_token_count:
             top_p_data = _extract_rollout_top_p_token_data(meta_info, expected_num_tokens=new_token_count)
             if top_p_data is not None:
@@ -556,6 +580,11 @@ class Sample:
         if self.rollout_log_probs is not None and len(self.rollout_log_probs) != self.response_length:
             raise ValueError(
                 f"rollout_log_probs length {len(self.rollout_log_probs)} != response_length {self.response_length}"
+            )
+        if self.rollout_full_logprobs is not None and len(self.rollout_full_logprobs) != self.response_length:
+            raise ValueError(
+                f"rollout_full_logprobs rows {len(self.rollout_full_logprobs)} != response_length "
+                f"{self.response_length}"
             )
 
         if self.rollout_top_p_token_ids is None and self.rollout_top_p_token_offsets is None:

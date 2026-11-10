@@ -21,6 +21,7 @@ _ROLLOUT_DATA_TENSOR_DTYPES = {
     "rollout_top_p_token_offsets": torch.int32,
     "rollout_top_p_log_probs": torch.float32,
     "teacher_log_probs": torch.float32,
+    "rollout_full_logprobs": torch.float32,
     "rollout_routed_experts": None,
 }
 
