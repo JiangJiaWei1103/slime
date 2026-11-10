@@ -542,6 +542,8 @@ def train_one_step(
     num_microbatches: int,
     step_global_batch_size: int,
     microbatch_pbar=None,
+    before_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP]], None] | None = None,
+    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP], float], None] | None = None,
 ) -> tuple[dict[str, float], float]:
     """Execute a single pipeline-parallel training step.
 
@@ -564,6 +566,10 @@ def train_one_step(
             normalizer inside the closure and as the LR scheduler
             ``increment``. In the common case (1 rollout = 1 sample) this
             equals the per-step sample count, so behavior is unchanged.
+        before_optimizer_step: Called after backward and gradient finalization,
+            before the optimizer reads the gradient buffers.
+        after_optimizer_step: Called only after a successful optimizer update,
+            before the scheduler step.
 
     Returns:
         tuple[dict[str, float], float]: Reduced loss dictionary (last stage only)
@@ -681,6 +687,9 @@ def train_one_step(
         forward_only=False,
     )
 
+    if before_optimizer_step is not None:
+        before_optimizer_step(optimizer, model)
+
     valid_step = True
     grad_norm = float("nan")
     if not getattr(args, "check_for_nan_in_loss_and_grad", True):
@@ -705,9 +714,12 @@ def train_one_step(
         # Update parameters.
         update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
+        assert update_successful
+        if after_optimizer_step is not None:
+            after_optimizer_step(optimizer, model, grad_norm)
+
         # Update learning rate. Use the per-step global_batch_size when dynamic
         # batching is on so the scheduler's samples-seen counter tracks reality.
-        assert update_successful
         opt_param_scheduler.step(increment=step_global_batch_size)
 
     if isinstance(grad_norm, torch.Tensor):
@@ -743,6 +755,8 @@ def train(
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
     global_batch_sizes: Sequence[int],
+    before_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP]], None] | None = None,
+    after_optimizer_step: Callable[[MegatronOptimizer, Sequence[DDP], float], None] | None = None,
 ) -> None:
     """Run training over a rollout consisting of multiple steps.
 
@@ -762,6 +776,8 @@ def train(
             ``num_microbatches``; consumed by ``train_one_step`` for loss
             scaling and LR scheduler increments. Equals per-step sample count
             in the common case (1 rollout = 1 sample).
+        before_optimizer_step: Forwarded to ``train_one_step``.
+        after_optimizer_step: Forwarded to ``train_one_step``.
     """
     args = get_args()
 
@@ -868,6 +884,8 @@ def train(
             num_microbatches[step_id],
             global_batch_sizes[step_id],
             microbatch_pbar=microbatch_pbar,
+            before_optimizer_step=before_optimizer_step,
+            after_optimizer_step=after_optimizer_step,
         )
 
         if step_id == 0:

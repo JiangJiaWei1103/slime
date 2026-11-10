@@ -61,6 +61,26 @@ logger = logging.getLogger(__name__)
 
 
 class MegatronTrainRayActor(TrainRayActor):
+    def initialize_model_and_optimizer(self, args: Namespace, role: str):
+        """Build model, optimizer and scheduler; subclasses may replace the model owner."""
+        return initialize_model_and_optimizer(args, role)
+
+    def create_weight_updater(self):
+        """Build the native weight updater; subclasses may supply its weight source."""
+        return create_weight_updater(
+            self.args,
+            self.model,
+            weights_getter=lambda: self.weights_backuper.get("actor"),
+            model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
+            quantization_config=getattr(self.hf_config, "quantization_config", None),
+        )
+
+    def before_optimizer_step(self, optimizer, model) -> None:
+        """Observe finalized gradients before the optimizer reads them."""
+
+    def after_optimizer_step(self, optimizer, model, grad_norm) -> None:
+        """Finish a successful update before the scheduler step and the next weight read."""
+
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
         self,
@@ -100,7 +120,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         dist.barrier(group=get_gloo_group())
 
-        self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
+        self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = self.initialize_model_and_optimizer(
             args, role
         )
 
@@ -150,13 +170,7 @@ class MegatronTrainRayActor(TrainRayActor):
             args.update_weight_start_version = (
                 args.start_rollout_id if args.start_rollout_id is not None else start_rollout_id
             )
-        self.weight_updater = create_weight_updater(
-            self.args,
-            self.model,
-            weights_getter=lambda: self.weights_backuper.get("actor"),
-            model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
-            quantization_config=getattr(self.hf_config, "quantization_config", None),
-        )
+        self.weight_updater = self.create_weight_updater()
 
         # empty cache after initialization
         clear_memory()
@@ -493,11 +507,14 @@ class MegatronTrainRayActor(TrainRayActor):
                     and not self.args.get_mismatch_metrics
                     and not self.args.use_critic
                     and not self.args.use_opd
+                    and not self.args.force_recompute_log_probs
                     and (not self.args.use_routing_replay or self.args.use_rollout_routing_replay)
                     and self.args.advantage_estimator != "gspo"
                 )
                 if (
-                    not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics
+                    not self.args.use_rollout_logprobs
+                    or self.args.get_mismatch_metrics
+                    or self.args.force_recompute_log_probs
                 ) and not can_reuse_log_probs_in_loss:
                     if self.args.use_routing_replay:
                         if self.args.use_rollout_routing_replay:
@@ -561,6 +578,8 @@ class MegatronTrainRayActor(TrainRayActor):
                     data_iterator,
                     num_microbatches,
                     global_batch_sizes,
+                    before_optimizer_step=self.before_optimizer_step,
+                    after_optimizer_step=self.after_optimizer_step,
                 )
             if capture_log_probs:
                 captured = drain_captured_log_probs()
